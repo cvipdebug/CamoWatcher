@@ -1,131 +1,137 @@
 import cv2
 import numpy as np
 import pytesseract
-from mss import mss
+import bettercam
 import time
 
-# Update the Tesseract path default path
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-
-selected_region = None
+# Path to Tesseract OCR binary (adjust if needed)
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 def preprocess_image(image):
+    """Convert image to grayscale for better OCR accuracy."""
     return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
 def extract_text(image):
-    custom_config = '--psm 6'  #OCR mode optimized for sparse text
+    """Extract text using Tesseract OCR with custom config."""
+    custom_config = '--psm 6'  # Assume a uniform block of text
     return pytesseract.image_to_string(image, config=custom_config).strip()
 
 def find_camo_name(text):
+    """Return the first line containing the word 'camo'."""
     for line in text.splitlines():
         if "camo" in line.lower():
             return line.strip()
     return None
 
-def live_preview_and_monitor(sct, show_monitor_window):
-    global selected_region
+def monitor_screen(show_monitor_window=True, region=None):
+    """Monitor a screen region using BetterCam and detect camo unlocks."""
+    print("[CamoWatcher] Starting BetterCam screen capture...")
 
-    if not selected_region:
-        print("No region selected! Please select a region before running.")
-        return
+    # Initialize BetterCam
+    cam = bettercam.create(output_color="BGR")
 
-    print("Real-time monitoring started. Press 'q' to stop.")
-    last_preview_update = 0
-    preview_interval = 0.5  # Adjust this to control how often the preview updates (in seconds)
+    if region:
+        cam.start(region=region)
+        get_frame = cam.get_latest_frame
+    else:
+        get_frame = cam.grab
 
     last_camo_name = None
     last_detection_time = 0
-    detection_timeout = 1
+    detection_timeout = 1  # seconds
+    preview_interval = 0.5  # seconds
+    last_preview_time = 0
 
     try:
         while True:
-            screen = np.array(sct.grab(selected_region))
-            screen = cv2.cvtColor(screen, cv2.COLOR_BGRA2BGR)
+            frame = get_frame()
+            if frame is None:
+                time.sleep(0.01)
+                continue
 
-            preprocessed = preprocess_image(screen)
-            detected_text = extract_text(preprocessed)
+            gray = preprocess_image(frame)
+            text = extract_text(gray)
+            camo_name = find_camo_name(text)
 
-            camo_name = find_camo_name(detected_text)
             if camo_name and camo_name != last_camo_name:
                 last_camo_name = camo_name
                 last_detection_time = time.time()
                 print(f"[CamoWatcher] Camo Unlocked: {camo_name}")
 
-            # Reset the last_camo_name if the timeout has passed
+            # Reset camo if timeout passed
             if time.time() - last_detection_time > detection_timeout:
                 last_camo_name = None
 
-            # Update preview window less frequently to save CPU
-            if show_monitor_window and (time.time() - last_preview_update > preview_interval):
-                cv2.imshow("Monitoring Window - CamoWatcher", screen)
-                last_preview_update = time.time()
+            # Show the frame preview
+            if show_monitor_window and time.time() - last_preview_time > preview_interval:
+                cv2.imshow("CamoWatcher - BetterCam", frame)
+                last_preview_time = time.time()
 
+            # Exit if 'q' is pressed
             if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("\nExiting real-time monitoring...")
+                print("\n[CamoWatcher] Exiting...")
                 break
 
-            # Add a small delay to reduce CPU usage
-            time.sleep(0.05)  # Sleep for 50ms to reduce CPU load
+            time.sleep(0.01)
 
     except KeyboardInterrupt:
-        print("\nMonitoring interrupted.")
+        print("\n[CamoWatcher] Monitoring interrupted by user.")
     finally:
+        if region:
+            cam.stop()
         cv2.destroyAllWindows()
+
+def select_region_on_screen():
+    """Allow the user to draw a box on their screen to define the capture region."""
+    print("[CamoWatcher] Draw a region using the mouse. Press 'q' when done.")
+    screen_cam = bettercam.create(output_color="BGR")
+    full_frame = screen_cam.grab()
+
+    region_box = {"start": None, "end": None, "selecting": False}
+    selected_region = {}
+
+    def mouse_callback(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            region_box["start"] = (x, y)
+            region_box["selecting"] = True
+        elif event == cv2.EVENT_MOUSEMOVE and region_box["selecting"]:
+            region_box["end"] = (x, y)
+        elif event == cv2.EVENT_LBUTTONUP:
+            region_box["end"] = (x, y)
+            region_box["selecting"] = False
+
+    cv2.namedWindow("Select Region")
+    cv2.setMouseCallback("Select Region", mouse_callback)
+
+    while True:
+        frame = full_frame.copy()
+        if region_box["start"] and region_box["end"]:
+            cv2.rectangle(frame, region_box["start"], region_box["end"], (0, 255, 0), 2)
+        cv2.imshow("Select Region", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cv2.destroyAllWindows()
+
+    if region_box["start"] and region_box["end"]:
+        x1, y1 = region_box["start"]
+        x2, y2 = region_box["end"]
+        selected_region = {
+            "left": min(x1, x2),
+            "top": min(y1, y2),
+            "right": max(x1, x2),
+            "bottom": max(y1, y2)
+        }
+        print(f"[CamoWatcher] Selected region: {selected_region}")
+        return (selected_region["left"], selected_region["top"], selected_region["right"], selected_region["bottom"])
+    else:
+        print("[CamoWatcher] No region selected, defaulting to full screen.")
+        return None
 
 if __name__ == "__main__":
-    with mss() as sct:
-        monitors = sct.monitors
-        print("Available monitors:")
-        for idx, monitor in enumerate(monitors):
-            print(f"{idx}: {monitor}")
+    use_custom_region = input("Do you want to select a screen region? (yes/no): ").strip().lower() == "yes"
+    region = select_region_on_screen() if use_custom_region else None
 
-        monitor_index = int(input("Enter the monitor index you want to use (default is 1): ").strip() or 1)
-        if monitor_index < 1 or monitor_index >= len(monitors):
-            print("Invalid index. Defaulting to monitor 1.")
-            monitor_index = 1
+    show_window = input("Do you want to show the monitoring preview window? (yes/no): ").strip().lower() == "yes"
 
-        selected_monitor = monitors[monitor_index]
-        print(f"Selected Monitor: {selected_monitor}")
-
-        screen = np.array(sct.grab(selected_monitor))
-        screen = cv2.cvtColor(screen, cv2.COLOR_BGRA2BGR)
-
-        global start_point, end_point, is_selecting
-        start_point, end_point, is_selecting = None, None, False
-
-        def select_region(event, x, y, flags, param):
-            global start_point, end_point, is_selecting, selected_region
-            if event == cv2.EVENT_LBUTTONDOWN:
-                start_point = (x, y)
-                is_selecting = True
-            elif event == cv2.EVENT_MOUSEMOVE and is_selecting:
-                end_point = (x, y)
-            elif event == cv2.EVENT_LBUTTONUP:
-                end_point = (x, y)
-                is_selecting = False
-                selected_region = {
-                    "left": selected_monitor["left"] + min(start_point[0], end_point[0]),
-                    "top": selected_monitor["top"] + min(start_point[1], end_point[1]),
-                    "width": abs(end_point[0] - start_point[0]),
-                    "height": abs(end_point[1] - start_point[1]),
-                }
-                print(f"Selected Region: {selected_region}")
-
-        cv2.namedWindow("Select Region")
-        cv2.setMouseCallback("Select Region", select_region)
-
-        while True:
-            temp_image = screen.copy()
-            if start_point and end_point and is_selecting:
-                cv2.rectangle(temp_image, start_point, end_point, (0, 255, 0), 2)
-
-            cv2.imshow("Select Region", temp_image)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
-        cv2.destroyAllWindows()
-
-        user_choice = input("Do you want to see the monitoring box? (yes/no): ").strip().lower()
-        show_monitor_window = user_choice == "yes"
-
-        live_preview_and_monitor(sct, show_monitor_window)
+    monitor_screen(show_monitor_window=show_window, region=region)
